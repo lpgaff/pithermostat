@@ -1,0 +1,211 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+@author: Liam Gaffney
+"""
+import requests
+import logging
+import pigpio
+import DHT22
+import RPi.GPIO as GPIO
+import init
+import sys
+import mydb
+import mymail
+import settemp
+import t
+from time import sleep
+from influxdb import InfluxDBClient
+
+HTTP_TIMEOUT=10
+
+def toggleHeating():
+	try:
+		GPIO.output(rel, not GPIO.input(rel))
+	except Exception as e:
+		msg = "Could not toggle heating for GPIO " + str(rel) + ", error: " + str(e)
+		mydb.sendlog(msg,"err")
+		lgr.error(msg)
+		mymail.connectAndSend(retries = 0, sleepTime = 60, emailSubject = "[RPi Thermostat] Could not toggle heating for GPIO " + str(rel), emailText=str(e))
+		sys.exit(msg)
+
+def getHeatingState():
+	if (GPIO.input(rel) == GPIO.HIGH):
+		return False
+	elif (GPIO.input(rel) == GPIO.LOW):
+		return True
+
+
+# function to trigger and read the sensor
+def read_sensor_data(s):
+
+	ntries = 0
+	temp = -999.0
+	humi = -999.0
+
+	while( float(temp) < -50.0 and ntries < 10.0 ):
+
+		# Trigger the readout of the DHT22 sensor
+		try:
+			lgr.debug("Triggering the sensor")
+			s.trigger()
+			sleep(3.0) # just so the Pi doesn't go too fast
+		except Exception as e:
+			msg = "Problem triggering the sensor, error:  " + str(e)
+			mydb.sendlog(msg,"err")
+			lgr.error(msg)
+			mymail.connectAndSend(retries = 0, sleepTime = 60, emailSubject = "[RPi Thermostat] Problem triggering the sensor", emailText=str(e))
+			sys.exit(msg)
+
+		# Get Temperature from the DHT22 sensor
+		try:
+			lgr.debug("Reading temperature")
+			temp = s.temperature()
+			sleep(0.2)
+			lgr.debug("Temperature: " + str(temp))
+		except Exception as e:
+			msg = "Could not read temperature: " + str(e)
+			mydb.sendlog(msg,"err")
+			lgr.error(msg)
+
+		# Get humidity from the DHT22 sensor
+		try:
+			lgr.debug("Reading temperature")
+			humi = s.humidity()
+			sleep(0.2)
+			lgr.debug("Humidity: " + str(humi))
+		except Exception as e:
+			msg = "Could not read humidity: " + str(e)
+			mydb.sendlog(msg,"err")
+			lgr.error(msg)
+
+		# Try again if we didn't get a good temperature reading
+		ntries += 1
+
+	return ( float(temp), float(humi) )
+
+
+
+# Logger importing
+lgr = logging.getLogger(__name__)
+
+# InfluxDB Client
+client = InfluxDBClient( host=init.INFLUX_HOST, port=init.INFLUX_PORT, database=init.INFLUX_DB, username=init.INFLUX_USER, password=init.INFLUX_PASSWD )
+
+# Relay pinout
+rel = init.PIN_BCM
+
+# this connects to the pigpio daemon which must be started first
+# Pigpio DHT22 module should be in same folder as your program
+try:
+	lgr.debug("Connecting the pigpio daemon")
+	pi = pigpio.pi()
+except Exception as e:
+	msg = "Couldn't connect to the pigpio daemon, error: " + str(e)
+	mydb.sendlog(msg,"err")
+	lgr.error(msg)
+	mymail.connectAndSend(retries = 0, sleepTime = 60, emailSubject = "[RPi Thermostat] Couldn't connect to the pigpio daemon", emailText=str(e))
+	sys.exit(msg)
+
+# Check email for new temperature settings
+try:
+	newT = mymail.readEmail()
+	if newT > -50:
+		msg = "Setting new temperature from email: " + str(newT)
+		mydb.sendlog(msg,"info")
+		lgr.info(msg)
+		settemp.do_settemp(newT)
+	else:
+		lgr.debug("Continuing with previous temperature")
+	xtemp = float(newT) # if temperature isn't updated, newT = -666
+except Exception as e:
+	msg = "Couldn't read emails, error " + str(e)
+	mydb.sendlog(msg,"err")
+	lgr.error(msg)
+	mymail.connectAndSend(retries = 0, sleepTime = 60, emailSubject = "[RPi Thermostat] Couldn't read emails", emailText=str(e))
+	sys.exit(msg)
+
+# if TEMP_OveRRIDE is sen in init.py, then it overrides the temp being set by scheduler in t.py
+if (init.TEMP_OVERRIDE !=0):
+	xtemp = init.TEMP_OVERRIDE
+elif xtemp < -50: # if we haven't just got a new T from email, newT = -666, so read from t.py
+	xtemp = t.T
+t_low = xtemp - init.TEMP_HYSTERESIS
+t_high = xtemp + init.TEMP_HYSTERESIS
+
+# Initiate the sensor
+try:
+	lgr.debug("Getting sensor on pin " + str(init.SENSOR_BCM))
+	sensor = DHT22.sensor(pi, init.SENSOR_BCM)
+except Exception as e:
+	msg = "Could not get sensor with on pin " + str(init.SENSOR_BCM) + ", error: " + str(e)
+	mydb.sendlog(msg,"err")
+	lgr.error(msg)
+	mymail.connectAndSend(retries = 0, sleepTime = 60, emailSubject = "[RPi Thermostat] Could not get sensor on pin " + str(init.SENSOR_BCM), emailText=str(e))
+	sys.exit(msg)
+
+# Initiate the relay
+try:
+	lgr.debug("Setting up GPIO")
+	GPIO.setmode(GPIO.BCM)
+	GPIO.setup(rel,GPIO.OUT)
+	GPIO.setwarnings(False)
+	lgr.debug("GPIO " + str(rel) + " initialized as out. Current state: " + str(GPIO.input(rel)))
+except Exception as e:
+	msg = "Could not set up GPIO, error: " + str(e)
+	mydb.sendlog(msg,"err")
+	lgr.error(msg)
+	mymail.connectAndSend(retries = 0, sleepTime = 60, emailSubject = "[RPi Thermostat] Could not set up GPIO", emailText=str(e))
+	sys.exit(msg)
+
+
+# Read the sensor data
+temp, humi = read_sensor_data(sensor)
+
+# Log the data with Influx and change the heating
+payload = []
+if ((temp > -50.0) and (humi > -50.0)):
+
+	# Test the heating cycle
+	payload_b = ''
+	if ((not getHeatingState()) and (temp < t_low)):
+		msg = "Temperature " + str(temp) + " < " + str(t_low) + ". Turning on"
+		lgr.info(msg)
+		mydb.sendlog(msg,"info")
+		toggleHeating()
+		payload_b = 'boilerstate value=1'
+	elif ((getHeatingState()) and (temp > t_high)):
+		msg = "Temperature " + str(temp) + " > " + str(t_high) + ". Turning off"
+		lgr.info(msg)
+		mydb.sendlog(msg,"info")
+		toggleHeating()
+		payload_b = 'boilerstate value=0'
+	else:
+		lgr.debug("Temperature ok. Low: " + str(t_low) + ", current: " + str(temp) + ", high:  " + str(t_high) + "Heating: " + str(getHeatingState()))
+
+
+	try:
+		lgr.debug("Sending data to Influx")
+		payload.append('temperature,sensor=' + str(init.LOCATION) + ' value=' + ('%.3f' % temp) )
+		payload.append('humidity,sensor=' + str(init.LOCATION) + ' value=' + ('%.3f' % humi) )
+		payload.append('settemp value=' + str(xtemp) )
+		payload.append(payload_b)
+		r = mydb.senddata(payload)
+		lgr.debug("Influx payload: " + str(payload))
+		lgr.debug("Influx result: {0}".format(r) )
+	except Exception as e:
+		lgr.error("Could not send data to Influx: " + str(e))
+		mymail.connectAndSend(retries = 0, sleepTime = 60, emailSubject = "[RPi Thermostat] Could not send data to Influx", emailText=str(e))
+		sys.exit("Could not send data to Influx: " + str(e))
+
+
+
+# Bad readings from the probe
+else:
+	error_string = "Problem reading the sensor: temp = " + str(temp) + "; humidity = " + str(humi)
+	lgr.error(str(error_string))
+	mydb.sendlog(error_string,"err")
+	#mymail.connectAndSend(retries = 0, sleepTime = 60, emailSubject = "[RPi Thermostat] Problem reading the sensor", emailText=str(error_string))
+
+
+

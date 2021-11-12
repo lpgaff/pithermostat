@@ -1,0 +1,67 @@
+# -*- coding: utf-8 -*-
+"""
+@author: Liam Gaffney
+"""
+import logging
+import logging.handlers
+LOG_LVL_FILE = logging.INFO
+LOG_LVL_CONSOLE = logging.DEBUG
+# Gmail Sign In data
+GMAIL_SENDER = "thermostat.email.address@gmail.com"
+GMAIL_PASSWD = "passswordtokenfromgmail"
+GMAIL_SERVER = "smtp.gmail.com"
+GMAIL_READER = "imap.gmail.com"
+GMAIL_PORT = 465
+
+APP_NAME = "thermostat"
+HOME_DIR = "/home/pi/" + APP_NAME + "/"
+
+T_FILE = HOME_DIR + "t.py"
+
+# InfluxDB server settings
+INFLUX_HOST = 'localhost'
+INFLUX_PORT = 8086
+INFLUX_DB = 'home'
+INFLUX_USER = 'admin'
+INFLUX_PASSWD = 'influxpassword'
+
+# Sensor location: 'kitchen', 'hallway', 'snug', 'bedroom1', 'bedroom2', 'bedroom3' 
+LOCATION = "kitchen"
+
+# Default email settings
+EMAIL_TO = 'personal.email.address@gmail.com'
+EMAIL_SUBJECT = 'Pi Thermostat message'
+EMAIL_TEXT = 'Message text'
+
+# Temperature override
+TEMP_OVERRIDE = 0
+
+# Hysteresis +-
+TEMP_HYSTERESIS = 0.4
+
+# Repition time between measurements in secs
+REP_TIME = 120
+
+# GPIO pin number of relay and sensor - BCM numbering
+RELAY_BCM = 24
+SENSOR_BCM = 4
+POWER_BCM = 17
+
+# create logger with 'spam_application'
+logger = logging.getLogger('')
+logger.setLevel(logging.DEBUG)
+logger.handlers = []
+# create file handler which logs even debug messages
+fh = logging.handlers.RotatingFileHandler("/var/log/thermostat.log", maxBytes = 1000000, backupCount=20, encoding="utf8")
+fh.setLevel(LOG_LVL_FILE)
+# create console handler with a higher log level
+ch = logging.StreamHandler()
+ch.setLevel(LOG_LVL_CONSOLE)
+# create formatter and add it to the handlers
+formatter = logging.Formatter('%(asctime)s %(levelname)s %(filename)s[%(lineno)d].%(funcName)s: %(message)s')
+#formatter = logging.Formatter('Chuj %(message)s')
+fh.setFormatter(formatter)
+ch.setFormatter(formatter)
+# add the handlers to the logger
+logger.addHandler(fh)
+logger.addHandler(ch)
